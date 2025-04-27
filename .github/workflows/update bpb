@@ -30,7 +30,7 @@ jobs:
 
       - name: 检查并更新 Worker
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub Token 认证
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 日志函数
           log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"; }
@@ -43,18 +43,22 @@ jobs:
 
           # 获取最新 Release
           log "获取最新 Release 信息..."
-          RESPONSE=$(curl -s --retry 3 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
+          RESPONSE=$(curl -s --retry 5 --retry-delay 2 -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/vnd.github.v3+json" "$REPO_URL")
           if [ $? -ne 0 ]; then
-            log "ERROR: 无法访问 GitHub API"
+            log "ERROR: 无法访问 GitHub API，可能网络问题或仓库不可访问"
             exit 1
           fi
 
-          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
-
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-            log "ERROR: 未找到 $TARGET_FILE"
+          TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name // "未知"')
+          if [ "$TAG_NAME" = "未知" ]; then
+            log "ERROR: 无法获取最新 Release，可能仓库无 Release"
             exit 1
+          fi
+
+          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
+            log "WARNING: 未找到 $TARGET_FILE，跳过更新"
+            exit 0
           fi
           log "最新版本: $TAG_NAME"
 
@@ -67,16 +71,21 @@ jobs:
 
           # 下载并更新
           log "下载 $TARGET_FILE..."
-          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
+          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL" || { log "ERROR: 下载失败"; exit 1; }
+          log "检查 $TARGET_FILE..."
+          if ! file "$TARGET_FILE" | grep -q "Zip archive"; then
+            log "ERROR: $TARGET_FILE 不是有效的 ZIP 文件"
+            exit 1
+          fi
           log "解压 $TARGET_FILE..."
-          unzip -o "$TARGET_FILE"
+          unzip -o "$TARGET_FILE" || { log "ERROR: 解压失败"; exit 1; }
           rm "$TARGET_FILE"
           echo "$TAG_NAME" > version.txt
           log "更新完成，新版本: $TAG_NAME"
 
       - name: 提交更改
-        if: success() # 仅在更新成功时提交
+        if: success()
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "🔄 自动同步 Worker 版本: ${{ steps.check_update.outputs.tag_name || '未知' }}"
+          commit_message: "🔄 自动同步 Worker 版本: ${{ env.TAG_NAME || '未知' }}"
           commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
